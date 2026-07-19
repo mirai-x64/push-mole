@@ -195,14 +195,41 @@ async function main() {
   const finalCount = await evaluate('__t.count()');
   check('放置すると16穴が埋まって終了する', over && finalCount === 16, `残数=${finalCount}`);
 
-  // 終了後は入力を受け付けない
+  // 終了直後は、誤タップで再開しない(「終了」を読む間がある)
+  check('終了直後は再開が塞がれている', await evaluate('__t.locked()'));
   await evaluate("__t.tapAt(0, 'right')");
   await settle();
-  check('終了後は叩いても動かない', (await evaluate('__t.count()')) === 16);
+  check('終了直後に叩いても盤は動かない',
+    (await evaluate('__t.count()')) === 16 && (await evaluate('__t.over()')) === true);
+
+  // 猶予が切れれば叩いて再開できる
+  await sleep(1100);
+  check('猶予が切れると再開できるようになる', !(await evaluate('__t.locked()')));
+  await evaluate("__t.tapAt(0, 'right')");
+  await settle();
+  check('再開すると盤が初期状態に戻る',
+    (await evaluate('__t.over()')) === false && (await evaluate('__t.count()')) === 3,
+    `残数=${await evaluate('__t.count()')}`);
+  await evaluate('__t.pause()');
+
+  // --- 得点(既読) ---------------------------------------------------
+  await evaluate('__t.reset([0, 1])');
+  await evaluate("__t.tapAt(0, 'right')");
+  await settle();
+  await sleep(60);
+  check('ぶつけると既読が2件増える', (await evaluate('__t.read()')) === 2,
+    `既読=${await evaluate('__t.read()')}`);
+
+  // 空振りでは既読が増えない
+  await evaluate('__t.reset([0])');
+  await evaluate("__t.tapAt(0, 'up')");
+  await settle();
+  check('壁での空振りでは既読が増えない', (await evaluate('__t.read()')) === 0);
 
   // 画面に「終了」が出ているか、描画結果そのものを見る
+  // 描画そのものが通ること
   const shot = await send('Page.captureScreenshot', { format: 'png' });
-  check('終了画面を描画できた', !!shot.data && shot.data.length > 1000);
+  check('画面を描画できた', !!shot.data && shot.data.length > 1000);
 
   const failed = results.filter(r => !r.ok);
   console.log(`\n${results.length - failed.length}/${results.length} 通過`);

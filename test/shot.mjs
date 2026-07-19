@@ -8,7 +8,7 @@ const PORT = 9000 + Math.floor(Math.random() * 900);
 const PROFILE = mkdtempSync(join(tmpdir(), 'mole-'));
 const chrome = spawn('google-chrome', [
   '--headless=new', `--remote-debugging-port=${PORT}`, `--user-data-dir=${PROFILE}`,
-  '--no-sandbox', '--disable-gpu', '--window-size=600,600',
+  '--no-sandbox', '--disable-gpu', '--window-size=460,700',
   'file://' + join(process.cwd(), 'index.html'),
 ], { stdio: 'ignore' });
 
@@ -44,23 +44,22 @@ await evaluate('__t.pause()');
 
 // キャンバスは 600x600 の窓の中央。画面座標に直してからカーソルを置く。
 const box = await evaluate('JSON.stringify(c.getBoundingClientRect())').then(JSON.parse);
-const at = (cell, dir) => {
-  const D = { up: [0,-1], down: [0,1], left: [-1,0], right: [1,0] }[dir];
-  return {                       // 押したい向きの反対側を叩く
-    x: box.left + 24 + (cell % 4) * 96 + 48 - D[0] * 30,
-    y: box.top  + 24 + ((cell / 4) | 0) * 96 + 48 - D[1] * 30,
-  };
+// キャンバスは CSS で縮む。ページ側と同じ倍率を掛けないと別のマスを指す。
+const sx = box.width / 360, sy = box.height / 640;
+const at = async (cell, dir) => {
+  const [px, py] = await evaluate(`JSON.stringify(__t.cellAt(${cell}, '${dir}'))`).then(JSON.parse);
+  return { x: box.left + px * sx, y: box.top + py * sy };
 };
 
 // 盤にモグラを並べ、カーソルを乗せて押す向きのヒントを出す
 await evaluate('__t.reset([0, 2, 5, 9, 10, 15])');
-await send('Input.dispatchMouseEvent', { type: 'mouseMoved', ...at(5, 'right'), button: 'none' });
+await send('Input.dispatchMouseEvent', { type: 'mouseMoved', ...(await at(5, 'right')), button: 'none' });
 await sleep(120);
 await shot('mole-board');
 
 // 壁を向いたとき(最上段のモグラを上へ押そうとする)
 await evaluate('__t.reset([0, 2, 5, 9, 10, 15])');
-await send('Input.dispatchMouseEvent', { type: 'mouseMoved', ...at(2, 'up'), button: 'none' });
+await send('Input.dispatchMouseEvent', { type: 'mouseMoved', ...(await at(2, 'up')), button: 'none' });
 await sleep(120);
 await shot('mole-wall');
 

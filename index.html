@@ -7,51 +7,55 @@
 <style>
   html, body {
     margin: 0; height: 100%;
-    background: #15171c;
+    background: #0e1014;
     display: flex; align-items: center; justify-content: center;
     font-family: sans-serif;
     -webkit-user-select: none; user-select: none;
   }
-  canvas { touch-action: manipulation; cursor: pointer; }
+  canvas { touch-action: manipulation; cursor: pointer; max-height: 100vh; }
 </style>
 </head>
 <body>
-<canvas id="c" width="432" height="432"></canvas>
+<canvas id="c" width="360" height="640"></canvas>
 <script>
 'use strict';
 
-const N = 4, CELL = 96, PAD = 24, HOLE_R = 34;
+// ---- 盤の仕様 --------------------------------------------------------
+const N = 4, CELL = 66, HOLE_R = 23;
+const BX = 48, BY = 96;              // 盤の左上(液晶の中)
 const SPAWN_MS = 1600;
 const HOP_MS = 200;
 
-const BG    = '#c7d0bd';  // 液晶の地
-const INK   = '#20261c';  // 濃い画素
-const FAINT = '#9aa891';  // 薄い画素
+// ---- 液晶と筐体の色 --------------------------------------------------
+const BG    = '#b9c4a8';   // 液晶の地
+const INK   = '#1c2118';   // 濃い画素
+const FAINT = '#9aa78c';   // 薄い画素
+const BODY  = '#2f333a';   // 筐体
+const BODY2 = '#3d424b';   // 筐体のハイライト
+const KEY   = '#4a505a';
 
-const DIRS = {
-  up:    [0, -1],
-  down:  [0,  1],
-  left:  [-1, 0],
-  right: [1,  0],
-};
+const DIRS = { up: [0,-1], down: [0,1], left: [-1,0], right: [1,0] };
+
+const SCREEN = { x: 36, y: 62, w: 288, h: 322 };
 
 const canvas = document.getElementById('c');
 const ctx = canvas.getContext('2d');
 
-let grid = new Array(N * N).fill(null);   // null | {facing}
-let anim = null;                          // 飛行中の1件。ある間は入力を止める
+let grid = new Array(N * N).fill(null);
+let anim = null;                 // 飛行中の1件。ある間は入力を止める
 let bursts = [];
 let spawnAcc = 0;
 let paused = false;
 let gameOver = false;
-let hover = null;                         // {cell, dir}
+let hover = null;
+let read = 0;                    // 既読にした着信の数
+let overLock = 0;                // 終了直後の誤タップで再開しないための猶予(ms)
 
-// --- 盤の座標 ---------------------------------------------------------
+// ---- 盤の座標 --------------------------------------------------------
 
 function cellOrigin(i) {
-  return [PAD + (i % N) * CELL, PAD + Math.floor(i / N) * CELL];
+  return [BX + (i % N) * CELL, BY + Math.floor(i / N) * CELL];
 }
-
 function cellCenter(i) {
   const [x, y] = cellOrigin(i);
   return [x + CELL / 2, y + CELL / 2];
@@ -68,18 +72,39 @@ function neighbor(i, dir) {
 // キャンバス座標 -> {cell, dir}。マス内のどこを叩いたかで向きが決まる。
 // 叩いた点の「反対側」へ飛ぶので、中心から見た叩点のオフセットを反転する。
 function pick(px, py) {
-  if (px < PAD || py < PAD || px >= PAD + N * CELL || py >= PAD + N * CELL) return null;
-  const col = Math.floor((px - PAD) / CELL), row = Math.floor((py - PAD) / CELL);
+  if (px < BX || py < BY || px >= BX + N * CELL || py >= BY + N * CELL) return null;
+  const col = Math.floor((px - BX) / CELL), row = Math.floor((py - BY) / CELL);
   const cell = row * N + col;
   const [cx, cy] = cellCenter(cell);
   const dx = px - cx, dy = py - cy;
-  let dir;
-  if (Math.abs(dx) >= Math.abs(dy)) dir = dx < 0 ? 'right' : 'left';
-  else                              dir = dy < 0 ? 'down'  : 'up';
+  const dir = Math.abs(dx) >= Math.abs(dy)
+    ? (dx < 0 ? 'right' : 'left')
+    : (dy < 0 ? 'down'  : 'up');
   return { cell, dir };
 }
 
-// --- 手を打つ ---------------------------------------------------------
+// ---- 音(着信音風) --------------------------------------------------
+
+let ac = null;
+function beep(freq, dur, vol, delay) {
+  if (!ac) return;
+  try {
+    const o = ac.createOscillator(), g = ac.createGain();
+    o.type = 'square';
+    o.frequency.value = freq;
+    o.connect(g); g.connect(ac.destination);
+    const t = ac.currentTime + (delay || 0);
+    g.gain.setValueAtTime(vol, t);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    o.start(t); o.stop(t + dur);
+  } catch (e) {}
+}
+const sndRing  = () => { beep(1318, 0.07, 0.05, 0); beep(1760, 0.09, 0.05, 0.08); };
+const sndRead  = () => { beep(988, 0.05, 0.06, 0); beep(1319, 0.05, 0.06, 0.05); beep(1760, 0.12, 0.06, 0.1); };
+const sndWall  = () => beep(150, 0.06, 0.05, 0);
+const sndOver  = () => { beep(660, 0.12, 0.05, 0); beep(523, 0.12, 0.05, 0.13); beep(392, 0.3, 0.05, 0.26); };
+
+// ---- 手を打つ --------------------------------------------------------
 
 function tap(cell, dir) {
   if (gameOver || anim) return;
@@ -92,6 +117,7 @@ function tap(cell, dir) {
   if (dest === -1) {
     // 壁。元の穴に落ちる。向きが変わるだけの空振り。
     anim = { kind: 'bump', from: cell, to: cell, dir, victim: false, t: 0 };
+    sndWall();
     return;
   }
 
@@ -102,10 +128,17 @@ function tap(cell, dir) {
     return;
   }
 
-  // 衝突。盤からモグラが減る唯一の道。
+  // 衝突。盤から着信が減る唯一の道。
   grid[cell] = null;
   grid[dest] = null;
   anim = { kind: 'hop', from: cell, to: dest, dir, victim: true, t: 0 };
+}
+
+function endGame() {
+  if (gameOver) return;
+  gameOver = true;
+  overLock = 900;                // これが切れるまで叩いても再開しない
+  sndOver();
 }
 
 function emptyCells() {
@@ -116,41 +149,167 @@ function emptyCells() {
 
 function spawn() {
   const free = emptyCells();
-  if (free.length === 0) { gameOver = true; return; }
-  const i = free[Math.floor(Math.random() * free.length)];
-  grid[i] = { facing: 'down', born: 0 };
-  if (emptyCells().length === 0) gameOver = true;
+  if (free.length === 0) { endGame(); return; }
+  grid[free[Math.floor(Math.random() * free.length)]] = { facing: 'down' };
+  sndRing();
+  if (emptyCells().length === 0) endGame();
 }
 
-// --- 描画 -------------------------------------------------------------
+// ---- 描画: 筐体 ------------------------------------------------------
+
+function roundRect(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
+function drawBody() {
+  ctx.fillStyle = '#0e1014';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  // アンテナ
+  ctx.strokeStyle = BODY2;
+  ctx.lineWidth = 5;
+  ctx.beginPath();
+  ctx.moveTo(310, 30); ctx.lineTo(310, 4);
+  ctx.stroke();
+  ctx.fillStyle = BODY2;
+  ctx.beginPath();
+  ctx.arc(310, 5, 5, 0, Math.PI * 2);
+  ctx.fill();
+
+  // 本体
+  ctx.fillStyle = BODY;
+  roundRect(10, 18, 340, 616, 34);
+  ctx.fill();
+  ctx.strokeStyle = BODY2;
+  ctx.lineWidth = 2;
+  ctx.stroke();
+
+  // 受話口
+  ctx.fillStyle = '#1a1d22';
+  roundRect(150, 34, 60, 7, 4);
+  ctx.fill();
+
+  // 液晶のふち
+  ctx.fillStyle = '#1a1d22';
+  roundRect(SCREEN.x - 7, SCREEN.y - 7, SCREEN.w + 14, SCREEN.h + 14, 8);
+  ctx.fill();
+}
+
+function drawKeypad() {
+  const labels = [
+    ['1', '2', '3'], ['4', '5', '6'], ['7', '8', '9'], ['∗', '0', '#'],
+  ];
+  const sub = [
+    ['.@/', 'ABC', 'DEF'], ['GHI', 'JKL', 'MNO'],
+    ['PQRS', 'TUV', 'WXYZ'], ['', '␣', ''],
+  ];
+
+  // ソフトキー / 通話キー
+  ctx.fillStyle = KEY;
+  roundRect(34, 400, 78, 26, 13); ctx.fill();
+  roundRect(248, 400, 78, 26, 13); ctx.fill();
+  roundRect(150, 396, 60, 34, 17); ctx.fill();
+  ctx.fillStyle = '#c8ccd2';
+  ctx.font = '11px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('取消', 73, 413);
+  ctx.fillText('電源', 287, 413);
+  ctx.fillText('確定', 180, 413);
+
+  for (let r = 0; r < 4; r++) {
+    for (let cIdx = 0; cIdx < 3; cIdx++) {
+      const x = 42 + cIdx * 96, y = 444 + r * 46;
+      ctx.fillStyle = KEY;
+      roundRect(x, y, 84, 38, 10);
+      ctx.fill();
+      ctx.fillStyle = '#e2e5ea';
+      ctx.font = 'bold 15px sans-serif';
+      ctx.fillText(labels[r][cIdx], x + 42, y + 15);
+      ctx.fillStyle = '#a4a9b2';
+      ctx.font = '8px sans-serif';
+      ctx.fillText(sub[r][cIdx], x + 42, y + 28);
+    }
+  }
+}
+
+// ---- 描画: 液晶の中 --------------------------------------------------
+
+function drawStatusBar() {
+  const y = SCREEN.y + 6;
+
+  // アンテナ(電波)
+  ctx.fillStyle = INK;
+  for (let i = 0; i < 4; i++) {
+    const h = 3 + i * 2.5;
+    ctx.fillRect(SCREEN.x + 8 + i * 5, y + 12 - h, 3, h);
+  }
+  ctx.font = '9px sans-serif';
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'alphabetic';
+  ctx.fillText('圏内', SCREEN.x + 32, y + 12);
+
+  // 電池
+  const bx = SCREEN.x + SCREEN.w - 30;
+  ctx.strokeStyle = INK;
+  ctx.lineWidth = 1;
+  ctx.strokeRect(bx, y + 3, 20, 10);
+  ctx.fillRect(bx + 20, y + 6, 2, 4);
+  ctx.fillRect(bx + 2, y + 5, 16, 6);
+
+  // 未読/既読
+  ctx.textAlign = 'center';
+  ctx.font = 'bold 10px sans-serif';
+  ctx.fillText('未読 ' + countMoles() + '   既読 ' + read,
+    SCREEN.x + SCREEN.w / 2, y + 12);
+
+  ctx.beginPath();
+  ctx.moveTo(SCREEN.x + 4, y + 18);
+  ctx.lineTo(SCREEN.x + SCREEN.w - 4, y + 18);
+  ctx.strokeStyle = FAINT;
+  ctx.stroke();
+}
+
+function drawSoftKeys() {
+  const y = SCREEN.y + SCREEN.h - 6;
+  ctx.fillStyle = INK;
+  ctx.font = '10px sans-serif';
+  ctx.textBaseline = 'alphabetic';
+  ctx.textAlign = 'left';
+  ctx.fillText('■叩く', SCREEN.x + 6, y);
+  ctx.textAlign = 'right';
+  ctx.fillText(gameOver ? '■再接続' : '■退出', SCREEN.x + SCREEN.w - 6, y);
+}
 
 function drawHole(i) {
   const [cx, cy] = cellCenter(i);
   ctx.fillStyle = FAINT;
   ctx.beginPath();
-  ctx.ellipse(cx, cy + 6, HOLE_R, HOLE_R * 0.42, 0, 0, Math.PI * 2);
+  ctx.ellipse(cx, cy + 5, HOLE_R, HOLE_R * 0.42, 0, 0, Math.PI * 2);
   ctx.fill();
 }
 
-function drawMole(cx, cy, facing, scale) {
-  const s = scale === undefined ? 1 : scale;
+function drawMole(cx, cy, facing) {
   ctx.save();
   ctx.translate(cx, cy);
-  ctx.scale(s, s);
+  ctx.scale(0.68, 0.68);
 
   ctx.fillStyle = INK;
-  // 耳
-  const [ex] = [22];
   ctx.beginPath();
-  ctx.arc(-ex, -20, 7, 0, Math.PI * 2);
-  ctx.arc(ex, -20, 7, 0, Math.PI * 2);
+  ctx.arc(-22, -20, 7, 0, Math.PI * 2);
+  ctx.arc(22, -20, 7, 0, Math.PI * 2);
   ctx.fill();
-  // 体
   ctx.beginPath();
   ctx.ellipse(0, 0, 26, 28, 0, 0, Math.PI * 2);
   ctx.fill();
 
-  // 顔。向いている側に寄せることで、空振り(向きだけ変わる)が見て分かる。
+  // 顔は向いている側に寄る。空振り(向きだけ変わる)がこれで見える。
   const [fx, fy] = DIRS[facing];
   ctx.fillStyle = BG;
   ctx.beginPath();
@@ -166,8 +325,7 @@ function drawMole(cx, cy, facing, scale) {
 
 // 押す向きと、その行き先(または壁)を先に見せる
 function drawHint() {
-  if (!hover || anim || gameOver) return;
-  if (!grid[hover.cell]) return;
+  if (!hover || anim || gameOver || !grid[hover.cell]) return;
   const dest = neighbor(hover.cell, hover.dir);
   const [cx, cy] = cellCenter(hover.cell);
   const [dx, dy] = DIRS[hover.dir];
@@ -175,57 +333,61 @@ function drawHint() {
   ctx.save();
   ctx.strokeStyle = INK;
   ctx.fillStyle = INK;
-  ctx.lineWidth = 3;
+  ctx.lineWidth = 2;
 
-  // 矢印
-  const ax = cx + dx * 40, ay = cy + dy * 40;
+  const ax = cx + dx * 28, ay = cy + dy * 28;
   ctx.beginPath();
-  ctx.moveTo(cx + dx * 26, cy + dy * 26);
+  ctx.moveTo(cx + dx * 19, cy + dy * 19);
   ctx.lineTo(ax, ay);
   ctx.stroke();
   ctx.beginPath();
-  ctx.moveTo(ax + dx * 8, ay + dy * 8);
-  ctx.lineTo(ax - dx * 4 - dy * 6, ay - dy * 4 - dx * 6);
-  ctx.lineTo(ax - dx * 4 + dy * 6, ay - dy * 4 + dx * 6);
+  ctx.moveTo(ax + dx * 6, ay + dy * 6);
+  ctx.lineTo(ax - dx * 3 - dy * 5, ay - dy * 3 - dx * 5);
+  ctx.lineTo(ax - dx * 3 + dy * 5, ay - dy * 3 + dx * 5);
   ctx.closePath();
   ctx.fill();
 
   if (dest === -1) {
-    // 壁。ここへは出られない。
     const [ox, oy] = cellOrigin(hover.cell);
-    ctx.lineWidth = 5;
+    ctx.lineWidth = 4;
     ctx.beginPath();
     if (dx !== 0) {
-      const wx = dx < 0 ? ox + 3 : ox + CELL - 3;
-      ctx.moveTo(wx, oy + 10); ctx.lineTo(wx, oy + CELL - 10);
+      const wx = dx < 0 ? ox + 2 : ox + CELL - 2;
+      ctx.moveTo(wx, oy + 8); ctx.lineTo(wx, oy + CELL - 8);
     } else {
-      const wy = dy < 0 ? oy + 3 : oy + CELL - 3;
-      ctx.moveTo(ox + 10, wy); ctx.lineTo(ox + CELL - 10, wy);
+      const wy = dy < 0 ? oy + 2 : oy + CELL - 2;
+      ctx.moveTo(ox + 8, wy); ctx.lineTo(ox + CELL - 8, wy);
     }
     ctx.stroke();
   } else {
     const [tx, ty] = cellCenter(dest);
-    ctx.lineWidth = 3;
-    ctx.setLineDash([5, 5]);
+    ctx.lineWidth = 2;
+    ctx.setLineDash([4, 4]);
     ctx.beginPath();
-    ctx.arc(tx, ty, HOLE_R + 4, 0, Math.PI * 2);
+    ctx.arc(tx, ty, HOLE_R + 3, 0, Math.PI * 2);
     ctx.stroke();
   }
   ctx.restore();
 }
 
-function draw() {
-  ctx.fillStyle = BG;
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
+function countMoles() { return grid.filter(Boolean).length; }
 
+function drawScreen() {
+  ctx.save();
+  roundRect(SCREEN.x, SCREEN.y, SCREEN.w, SCREEN.h, 3);
+  ctx.clip();
+  ctx.fillStyle = BG;
+  ctx.fillRect(SCREEN.x, SCREEN.y, SCREEN.w, SCREEN.h);
+
+  drawStatusBar();
   for (let i = 0; i < grid.length; i++) drawHole(i);
   drawHint();
 
   for (let i = 0; i < grid.length; i++) {
     if (!grid[i]) continue;
-    if (anim && anim.kind === 'hop' && anim.to === i) continue; // 飛行中は anim 側で描く
+    if (anim && anim.kind === 'hop' && anim.to === i) continue;  // 飛行中は anim 側
     const [cx, cy] = cellCenter(i);
-    drawMole(cx, cy - 6, grid[i].facing, 1);
+    drawMole(cx, cy - 5, grid[i].facing);
   }
 
   if (anim) {
@@ -234,58 +396,75 @@ function draw() {
     const [dx, dy] = DIRS[anim.dir];
 
     if (anim.victim) {
-      // ぶつけられる側は着弾の瞬間まで見えている
-      const [tx, ty] = cellCenter(anim.to);
-      drawMole(tx, ty - 6, grid[anim.to] ? grid[anim.to].facing : 'down', 1);
+      const [tx, ty] = cellCenter(anim.to);   // ぶつけられる側は着弾まで見えている
+      drawMole(tx, ty - 5, 'down');
     }
 
     let x, y;
     if (anim.kind === 'bump') {
-      // 壁まで出て戻る
-      const p = Math.sin(Math.PI * t);
-      x = fx + dx * 30 * p;
-      y = fy + dy * 30 * p;
+      const p = Math.sin(Math.PI * t);        // 壁まで出て戻る
+      x = fx + dx * 22 * p;
+      y = fy + dy * 22 * p;
     } else {
       const [tx, ty] = cellCenter(anim.to);
       x = fx + (tx - fx) * t;
       y = fy + (ty - fy) * t;
     }
-    y -= 6 + Math.sin(Math.PI * t) * 26;
-    drawMole(x, y, anim.dir, 1);
+    y -= 5 + Math.sin(Math.PI * t) * 20;
+    drawMole(x, y, anim.dir);
   }
 
   for (const b of bursts) {
     const p = b.t;
     ctx.save();
     ctx.strokeStyle = INK;
-    ctx.lineWidth = 4 * (1 - p);
+    ctx.fillStyle = INK;
+    ctx.lineWidth = 3 * (1 - p);
     ctx.beginPath();
-    ctx.arc(b.x, b.y, 10 + p * 44, 0, Math.PI * 2);
+    ctx.arc(b.x, b.y, 8 + p * 32, 0, Math.PI * 2);
     ctx.stroke();
     for (let k = 0; k < 6; k++) {
-      const a = (k / 6) * Math.PI * 2;
-      const r = 14 + p * 40;
+      const a = (k / 6) * Math.PI * 2 + 0.4;
+      const r = 10 + p * 30;
       ctx.beginPath();
-      ctx.arc(b.x + Math.cos(a) * r, b.y + Math.sin(a) * r, 4 * (1 - p), 0, Math.PI * 2);
+      ctx.arc(b.x + Math.cos(a) * r, b.y + Math.sin(a) * r, 3 * (1 - p), 0, Math.PI * 2);
       ctx.fill();
     }
+    ctx.globalAlpha = 1 - p;
+    ctx.font = 'bold 11px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('既読', b.x, b.y - 18 - p * 14);   // 既読
     ctx.restore();
   }
 
+  drawSoftKeys();
+
   if (gameOver) {
     ctx.fillStyle = BG;
-    ctx.globalAlpha = 0.82;
-    ctx.fillRect(0, canvas.height / 2 - 44, canvas.width, 88);
+    ctx.globalAlpha = 0.86;
+    ctx.fillRect(SCREEN.x, SCREEN.y + 120, SCREEN.w, 84);
     ctx.globalAlpha = 1;
     ctx.fillStyle = INK;
-    ctx.font = 'bold 44px sans-serif';
     ctx.textAlign = 'center';
+    ctx.font = 'bold 34px sans-serif';
     ctx.textBaseline = 'middle';
-    ctx.fillText('終了', canvas.width / 2, canvas.height / 2);
+    ctx.fillText('終了', SCREEN.x + SCREEN.w / 2, SCREEN.y + 150);
+    ctx.font = '11px sans-serif';
+    ctx.fillText('未読 16 件 / 既読 ' + read + ' 件',
+      SCREEN.x + SCREEN.w / 2, SCREEN.y + 180);
+    ctx.textBaseline = 'alphabetic';
   }
+
+  ctx.restore();
 }
 
-// --- ループ -----------------------------------------------------------
+function draw() {
+  drawBody();
+  drawScreen();
+  drawKeypad();
+}
+
+// ---- ループ ----------------------------------------------------------
 
 let last = 0;
 function frame(now) {
@@ -297,13 +476,17 @@ function frame(now) {
     if (anim.t >= 1) {
       if (anim.victim) {
         const [tx, ty] = cellCenter(anim.to);
-        bursts.push({ x: tx, y: ty - 6, t: 0 });
+        bursts.push({ x: tx, y: ty - 5, t: 0 });
+        read += 2;
+        sndRead();
       }
       anim = null;
     }
   }
 
-  for (const b of bursts) b.t += dt / 320;
+  if (overLock > 0) overLock -= dt;
+
+  for (const b of bursts) b.t += dt / 340;
   bursts = bursts.filter(b => b.t < 1);
 
   // 飛行中は湧かせない。着地前のマスに湧くと見た目が壊れるため。
@@ -319,7 +502,7 @@ function frame(now) {
   requestAnimationFrame(frame);
 }
 
-// --- 入力 -------------------------------------------------------------
+// ---- 入力 ------------------------------------------------------------
 
 function toCanvas(e) {
   const r = canvas.getBoundingClientRect();
@@ -334,16 +517,30 @@ canvas.addEventListener('mousemove', e => {
   hover = pick(x, y);
 });
 canvas.addEventListener('mouseleave', () => { hover = null; });
+
 canvas.addEventListener('click', e => {
+  if (!ac) {
+    try { ac = new (window.AudioContext || window.webkitAudioContext)(); } catch (err) {}
+  }
   const [x, y] = toCanvas(e);
+  if (gameOver) { if (overLock <= 0) restart(); return; }
   const p = pick(x, y);
   if (p) tap(p.cell, p.dir);
 });
 
+function restart() {
+  grid = new Array(N * N).fill(null);
+  anim = null; bursts = []; spawnAcc = 0; read = 0; gameOver = false; overLock = 0;
+  for (let k = 0; k < 3; k++) {
+    const free = emptyCells();
+    grid[free[Math.floor(Math.random() * free.length)]] = { facing: 'down' };
+  }
+}
+
 for (let k = 0; k < 3; k++) spawn();
 requestAnimationFrame(frame);
 
-// --- 検証用フック -----------------------------------------------------
+// ---- 検証用フック ----------------------------------------------------
 
 window.__t = {
   pause()  { paused = true; },
@@ -351,19 +548,25 @@ window.__t = {
   reset(cells) {
     grid = new Array(N * N).fill(null);
     for (const i of cells) grid[i] = { facing: 'down' };
-    anim = null; bursts = []; gameOver = false; spawnAcc = 0;
+    anim = null; bursts = []; gameOver = false; spawnAcc = 0; read = 0; overLock = 0;
   },
   occupied() { return grid.map(m => (m ? 1 : 0)); },
   facing(i)  { return grid[i] ? grid[i].facing : null; },
-  count()    { return grid.filter(Boolean).length; },
+  count()    { return countMoles(); },
+  read()     { return read; },
   busy()     { return anim !== null; },
   over()     { return gameOver; },
-  // 実際の click を投げて、当たり判定と向きの導出まで通す
-  tapAt(cell, dir) {
+  locked()   { return overLock > 0; },
+  screen()   { return SCREEN; },
+  hover()    { return hover; },
+  cellAt(cell, dir) {
     const [cx, cy] = cellCenter(cell);
     const [dx, dy] = DIRS[dir];
-    // 反対側を叩く
-    const px = cx - dx * 30, py = cy - dy * 30;
+    return [cx - dx * 20, cy - dy * 20];   // 押したい向きの反対側を叩く点
+  },
+  // 実際の click を投げて、当たり判定と向きの導出まで通す
+  tapAt(cell, dir) {
+    const [px, py] = window.__t.cellAt(cell, dir);
     const r = canvas.getBoundingClientRect();
     canvas.dispatchEvent(new MouseEvent('click', {
       clientX: r.left + px * (r.width / canvas.width),
