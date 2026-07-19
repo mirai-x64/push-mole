@@ -1,0 +1,377 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>押しモグラ</title>
+<style>
+  html, body {
+    margin: 0; height: 100%;
+    background: #15171c;
+    display: flex; align-items: center; justify-content: center;
+    font-family: sans-serif;
+    -webkit-user-select: none; user-select: none;
+  }
+  canvas { touch-action: manipulation; cursor: pointer; }
+</style>
+</head>
+<body>
+<canvas id="c" width="432" height="432"></canvas>
+<script>
+'use strict';
+
+const N = 4, CELL = 96, PAD = 24, HOLE_R = 34;
+const SPAWN_MS = 1600;
+const HOP_MS = 200;
+
+const BG    = '#c7d0bd';  // 液晶の地
+const INK   = '#20261c';  // 濃い画素
+const FAINT = '#9aa891';  // 薄い画素
+
+const DIRS = {
+  up:    [0, -1],
+  down:  [0,  1],
+  left:  [-1, 0],
+  right: [1,  0],
+};
+
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+
+let grid = new Array(N * N).fill(null);   // null | {facing}
+let anim = null;                          // 飛行中の1件。ある間は入力を止める
+let bursts = [];
+let spawnAcc = 0;
+let paused = false;
+let gameOver = false;
+let hover = null;                         // {cell, dir}
+
+// --- 盤の座標 ---------------------------------------------------------
+
+function cellOrigin(i) {
+  return [PAD + (i % N) * CELL, PAD + Math.floor(i / N) * CELL];
+}
+
+function cellCenter(i) {
+  const [x, y] = cellOrigin(i);
+  return [x + CELL / 2, y + CELL / 2];
+}
+
+// 盤外なら -1。押し出し先が盤外であることが「壁にぶつかる」の判定そのもの。
+function neighbor(i, dir) {
+  const [dx, dy] = DIRS[dir];
+  const col = (i % N) + dx, row = Math.floor(i / N) + dy;
+  if (col < 0 || col >= N || row < 0 || row >= N) return -1;
+  return row * N + col;
+}
+
+// キャンバス座標 -> {cell, dir}。マス内のどこを叩いたかで向きが決まる。
+// 叩いた点の「反対側」へ飛ぶので、中心から見た叩点のオフセットを反転する。
+function pick(px, py) {
+  if (px < PAD || py < PAD || px >= PAD + N * CELL || py >= PAD + N * CELL) return null;
+  const col = Math.floor((px - PAD) / CELL), row = Math.floor((py - PAD) / CELL);
+  const cell = row * N + col;
+  const [cx, cy] = cellCenter(cell);
+  const dx = px - cx, dy = py - cy;
+  let dir;
+  if (Math.abs(dx) >= Math.abs(dy)) dir = dx < 0 ? 'right' : 'left';
+  else                              dir = dy < 0 ? 'down'  : 'up';
+  return { cell, dir };
+}
+
+// --- 手を打つ ---------------------------------------------------------
+
+function tap(cell, dir) {
+  if (gameOver || anim) return;
+  const mole = grid[cell];
+  if (!mole) return;                       // 空の穴は何も起きない
+
+  mole.facing = dir;
+  const dest = neighbor(cell, dir);
+
+  if (dest === -1) {
+    // 壁。元の穴に落ちる。向きが変わるだけの空振り。
+    anim = { kind: 'bump', from: cell, to: cell, dir, victim: false, t: 0 };
+    return;
+  }
+
+  if (grid[dest] === null) {
+    grid[dest] = mole;
+    grid[cell] = null;
+    anim = { kind: 'hop', from: cell, to: dest, dir, victim: false, t: 0 };
+    return;
+  }
+
+  // 衝突。盤からモグラが減る唯一の道。
+  grid[cell] = null;
+  grid[dest] = null;
+  anim = { kind: 'hop', from: cell, to: dest, dir, victim: true, t: 0 };
+}
+
+function emptyCells() {
+  const out = [];
+  for (let i = 0; i < grid.length; i++) if (grid[i] === null) out.push(i);
+  return out;
+}
+
+function spawn() {
+  const free = emptyCells();
+  if (free.length === 0) { gameOver = true; return; }
+  const i = free[Math.floor(Math.random() * free.length)];
+  grid[i] = { facing: 'down', born: 0 };
+  if (emptyCells().length === 0) gameOver = true;
+}
+
+// --- 描画 -------------------------------------------------------------
+
+function drawHole(i) {
+  const [cx, cy] = cellCenter(i);
+  ctx.fillStyle = FAINT;
+  ctx.beginPath();
+  ctx.ellipse(cx, cy + 6, HOLE_R, HOLE_R * 0.42, 0, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+function drawMole(cx, cy, facing, scale) {
+  const s = scale === undefined ? 1 : scale;
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.scale(s, s);
+
+  ctx.fillStyle = INK;
+  // 耳
+  const [ex] = [22];
+  ctx.beginPath();
+  ctx.arc(-ex, -20, 7, 0, Math.PI * 2);
+  ctx.arc(ex, -20, 7, 0, Math.PI * 2);
+  ctx.fill();
+  // 体
+  ctx.beginPath();
+  ctx.ellipse(0, 0, 26, 28, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // 顔。向いている側に寄せることで、空振り(向きだけ変わる)が見て分かる。
+  const [fx, fy] = DIRS[facing];
+  ctx.fillStyle = BG;
+  ctx.beginPath();
+  ctx.arc(-9 + fx * 5, -4 + fy * 4, 4, 0, Math.PI * 2);
+  ctx.arc(9 + fx * 5, -4 + fy * 4, 4, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.ellipse(fx * 9, 9 + fy * 6, 8, 6, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.restore();
+}
+
+// 押す向きと、その行き先(または壁)を先に見せる
+function drawHint() {
+  if (!hover || anim || gameOver) return;
+  if (!grid[hover.cell]) return;
+  const dest = neighbor(hover.cell, hover.dir);
+  const [cx, cy] = cellCenter(hover.cell);
+  const [dx, dy] = DIRS[hover.dir];
+
+  ctx.save();
+  ctx.strokeStyle = INK;
+  ctx.fillStyle = INK;
+  ctx.lineWidth = 3;
+
+  // 矢印
+  const ax = cx + dx * 40, ay = cy + dy * 40;
+  ctx.beginPath();
+  ctx.moveTo(cx + dx * 26, cy + dy * 26);
+  ctx.lineTo(ax, ay);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(ax + dx * 8, ay + dy * 8);
+  ctx.lineTo(ax - dx * 4 - dy * 6, ay - dy * 4 - dx * 6);
+  ctx.lineTo(ax - dx * 4 + dy * 6, ay - dy * 4 + dx * 6);
+  ctx.closePath();
+  ctx.fill();
+
+  if (dest === -1) {
+    // 壁。ここへは出られない。
+    const [ox, oy] = cellOrigin(hover.cell);
+    ctx.lineWidth = 5;
+    ctx.beginPath();
+    if (dx !== 0) {
+      const wx = dx < 0 ? ox + 3 : ox + CELL - 3;
+      ctx.moveTo(wx, oy + 10); ctx.lineTo(wx, oy + CELL - 10);
+    } else {
+      const wy = dy < 0 ? oy + 3 : oy + CELL - 3;
+      ctx.moveTo(ox + 10, wy); ctx.lineTo(ox + CELL - 10, wy);
+    }
+    ctx.stroke();
+  } else {
+    const [tx, ty] = cellCenter(dest);
+    ctx.lineWidth = 3;
+    ctx.setLineDash([5, 5]);
+    ctx.beginPath();
+    ctx.arc(tx, ty, HOLE_R + 4, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function draw() {
+  ctx.fillStyle = BG;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  for (let i = 0; i < grid.length; i++) drawHole(i);
+  drawHint();
+
+  for (let i = 0; i < grid.length; i++) {
+    if (!grid[i]) continue;
+    if (anim && anim.kind === 'hop' && anim.to === i) continue; // 飛行中は anim 側で描く
+    const [cx, cy] = cellCenter(i);
+    drawMole(cx, cy - 6, grid[i].facing, 1);
+  }
+
+  if (anim) {
+    const t = Math.min(1, anim.t);
+    const [fx, fy] = cellCenter(anim.from);
+    const [dx, dy] = DIRS[anim.dir];
+
+    if (anim.victim) {
+      // ぶつけられる側は着弾の瞬間まで見えている
+      const [tx, ty] = cellCenter(anim.to);
+      drawMole(tx, ty - 6, grid[anim.to] ? grid[anim.to].facing : 'down', 1);
+    }
+
+    let x, y;
+    if (anim.kind === 'bump') {
+      // 壁まで出て戻る
+      const p = Math.sin(Math.PI * t);
+      x = fx + dx * 30 * p;
+      y = fy + dy * 30 * p;
+    } else {
+      const [tx, ty] = cellCenter(anim.to);
+      x = fx + (tx - fx) * t;
+      y = fy + (ty - fy) * t;
+    }
+    y -= 6 + Math.sin(Math.PI * t) * 26;
+    drawMole(x, y, anim.dir, 1);
+  }
+
+  for (const b of bursts) {
+    const p = b.t;
+    ctx.save();
+    ctx.strokeStyle = INK;
+    ctx.lineWidth = 4 * (1 - p);
+    ctx.beginPath();
+    ctx.arc(b.x, b.y, 10 + p * 44, 0, Math.PI * 2);
+    ctx.stroke();
+    for (let k = 0; k < 6; k++) {
+      const a = (k / 6) * Math.PI * 2;
+      const r = 14 + p * 40;
+      ctx.beginPath();
+      ctx.arc(b.x + Math.cos(a) * r, b.y + Math.sin(a) * r, 4 * (1 - p), 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  if (gameOver) {
+    ctx.fillStyle = BG;
+    ctx.globalAlpha = 0.82;
+    ctx.fillRect(0, canvas.height / 2 - 44, canvas.width, 88);
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = INK;
+    ctx.font = 'bold 44px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('終了', canvas.width / 2, canvas.height / 2);
+  }
+}
+
+// --- ループ -----------------------------------------------------------
+
+let last = 0;
+function frame(now) {
+  const dt = last ? Math.min(64, now - last) : 16;
+  last = now;
+
+  if (anim) {
+    anim.t += dt / HOP_MS;
+    if (anim.t >= 1) {
+      if (anim.victim) {
+        const [tx, ty] = cellCenter(anim.to);
+        bursts.push({ x: tx, y: ty - 6, t: 0 });
+      }
+      anim = null;
+    }
+  }
+
+  for (const b of bursts) b.t += dt / 320;
+  bursts = bursts.filter(b => b.t < 1);
+
+  // 飛行中は湧かせない。着地前のマスに湧くと見た目が壊れるため。
+  if (!paused && !gameOver && !anim) {
+    spawnAcc += dt;
+    while (spawnAcc >= SPAWN_MS && !gameOver) {
+      spawnAcc -= SPAWN_MS;
+      spawn();
+    }
+  }
+
+  draw();
+  requestAnimationFrame(frame);
+}
+
+// --- 入力 -------------------------------------------------------------
+
+function toCanvas(e) {
+  const r = canvas.getBoundingClientRect();
+  return [
+    (e.clientX - r.left) * (canvas.width / r.width),
+    (e.clientY - r.top) * (canvas.height / r.height),
+  ];
+}
+
+canvas.addEventListener('mousemove', e => {
+  const [x, y] = toCanvas(e);
+  hover = pick(x, y);
+});
+canvas.addEventListener('mouseleave', () => { hover = null; });
+canvas.addEventListener('click', e => {
+  const [x, y] = toCanvas(e);
+  const p = pick(x, y);
+  if (p) tap(p.cell, p.dir);
+});
+
+for (let k = 0; k < 3; k++) spawn();
+requestAnimationFrame(frame);
+
+// --- 検証用フック -----------------------------------------------------
+
+window.__t = {
+  pause()  { paused = true; },
+  resume() { paused = false; },
+  reset(cells) {
+    grid = new Array(N * N).fill(null);
+    for (const i of cells) grid[i] = { facing: 'down' };
+    anim = null; bursts = []; gameOver = false; spawnAcc = 0;
+  },
+  occupied() { return grid.map(m => (m ? 1 : 0)); },
+  facing(i)  { return grid[i] ? grid[i].facing : null; },
+  count()    { return grid.filter(Boolean).length; },
+  busy()     { return anim !== null; },
+  over()     { return gameOver; },
+  // 実際の click を投げて、当たり判定と向きの導出まで通す
+  tapAt(cell, dir) {
+    const [cx, cy] = cellCenter(cell);
+    const [dx, dy] = DIRS[dir];
+    // 反対側を叩く
+    const px = cx - dx * 30, py = cy - dy * 30;
+    const r = canvas.getBoundingClientRect();
+    canvas.dispatchEvent(new MouseEvent('click', {
+      clientX: r.left + px * (r.width / canvas.width),
+      clientY: r.top + py * (r.height / canvas.height),
+      bubbles: true,
+    }));
+  },
+};
+</script>
+</body>
+</html>
