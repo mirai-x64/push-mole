@@ -1,6 +1,15 @@
 # 押しモグラ
 
-**遊ぶ: https://mirai-x64.github.io/push-mole/**
+`index.html` を単体でブラウザに開けば遊べる。依存もビルドもない。
+
+> **GitHub Pages は現在まだ配信できていない。**
+> 公開設定は済んでいるが、GitHub が自動生成する `pages-build-deployment` が
+> 毎回 `startup_failure` で落ちる。このリポジトリの Actions の既定トークンが
+> 読み取りのみ (`default_workflow_permissions: read`) で、デプロイに必要な
+> 書き込みが無いのが原因と思われる。
+> Settings → Actions → General → Workflow permissions を
+> 「Read and write」にすれば通るはず。設定を変えれば
+> https://mirai-x64.github.io/push-mole/ で遊べるようになる。
 
 叩いてもモグラは死なない。隣の穴へ飛ぶだけ。
 **モグラ同士をぶつけた時だけ消える。**
